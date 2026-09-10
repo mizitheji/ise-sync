@@ -1,0 +1,114 @@
+# config.example.yaml
+#
+# Copy this file to config.yaml and fill in your ISE node details.
+# Credentials are NEVER stored here — they come from environment variables
+# (see "Credentials" section below and in README.md).
+#
+# You can define as many nodes as you like under `nodes:`.
+# Each node gets its own name (used on the CLI with --from / --to),
+# its own base_url, and its own env_prefix for credentials.
+#
+# Example layouts:
+#   2 nodes  →  headquarters + branch-dr
+#   3 nodes  →  hq-pan + dr-pan + lab-standalone
+#   4 nodes  →  site-a + site-b + site-c + site-d
+#
+# Any two nodes can be compared or synced:
+#   python -m ise_sync.cli diff --from hq-pan --to dr-pan
+#   python -m ise_sync.cli sync --from hq-pan --to dr-pan --apply
+
+nodes:
+
+  # ── Node 1 ──────────────────────────────────────────────────────────────
+  hq-pan:
+    # Primary Admin Node for the HQ cluster.
+    # For a clustered deployment always point at the PAN — ERS writes
+    # must go to the PAN; reads can go to any ERS-enabled node.
+    base_url: "https://ise-hq-pan.example.com"
+    env_prefix: "ISE_HQ"       # → reads ISE_HQ_USER / ISE_HQ_PASS
+    verify_ssl: false           # set true if your cert chain is trusted
+
+  # ── Node 2 ──────────────────────────────────────────────────────────────
+  dr-standalone:
+    base_url: "https://ise-dr.example.com"
+    env_prefix: "ISE_DR"       # → reads ISE_DR_USER / ISE_DR_PASS
+    verify_ssl: false
+
+  # ── Node 3 (optional — add as many as you need) ─────────────────────────
+  # lab-standalone:
+  #   base_url: "https://ise-lab.example.com"
+  #   env_prefix: "ISE_LAB"    # → reads ISE_LAB_USER / ISE_LAB_PASS
+  #   verify_ssl: false
+
+  # ── Node 4 ──────────────────────────────────────────────────────────────
+  # site-b:
+  #   base_url: "https://ise-site-b.example.com"
+  #   env_prefix: "ISE_SITEB"  # → reads ISE_SITEB_USER / ISE_SITEB_PASS
+  #   verify_ssl: false
+
+
+# ── Credentials ─────────────────────────────────────────────────────────────
+#
+# For each node above, export two environment variables before running:
+#
+#   export ISE_HQ_USER=ise-api-account
+#   export ISE_HQ_PASS='your-password'
+#   export ISE_DR_USER=ise-api-account
+#   export ISE_DR_PASS='your-password'
+#
+# The env_prefix field controls which variable names are read.
+# A node with env_prefix: "ISE_SITEB" reads ISE_SITEB_USER / ISE_SITEB_PASS.
+#
+# Tip: put the exports in a local .env file (gitignored) and source it:
+#   source .env
+
+
+# ── Which resource types to sync ────────────────────────────────────────────
+#
+# Listed in dependency-safe order (parents before children).
+# Comment out anything you don't want touched.
+#
+# NOTE: Active Directory ("activedirectory") is hard-blocked in code —
+# domain join state is node-local and can't be safely synced.
+sync_resources:
+  - network_device_groups
+  - identity_groups
+  - endpoint_groups
+  - downloadable_acls
+  - authorization_profiles
+  - network_devices
+
+
+# ── Advanced / opt-in resources ──────────────────────────────────────────────
+#
+# Only included when you pass --include-advanced on the CLI.
+#
+# internal_users: actual account objects (not identity GROUPS - see
+# identity_groups above). ERS never returns password on GET, so a create
+# push will fail with a missing-field error rather than silently setting
+# a blank/guessed password; updates never touch password either way.
+#
+# network_access_policy_sets / device_admin_policy_sets: top-level policy
+# set containers only (name, rank, condition, state) via Open API - NOT
+# the authentication/authorization rules inside each set.
+#
+# Read the relevant README.md sections before enabling writes here.
+advanced_resources:
+  - internal_users
+  - network_access_policy_sets
+  - device_admin_policy_sets
+
+
+# ── Exclusion patterns ───────────────────────────────────────────────────────
+#
+# Objects whose names match any of these regex patterns are skipped entirely,
+# in both source and target, during diff and sync.
+# Useful for objects that legitimately differ between sites (e.g. a local
+# WAN-edge router entry or a site-specific NDG).
+#
+# Examples:
+#   "^DR-LOCAL-.*"   → skip anything named DR-LOCAL-<anything>
+#   "^LAB-.*"        → skip all lab-prefixed objects
+exclude_name_patterns:
+  - "^DR-LOCAL-.*"
+  - "^HQ-LOCAL-.*"
