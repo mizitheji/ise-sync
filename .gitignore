@@ -1,0 +1,19 @@
+# local config — contains real hostnames, never commit this
+config.yaml
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# snapshots (commit these separately if you want git-tracked audit trail)
+snapshots/
+
+# IDE
+.vscode/
+.idea/
