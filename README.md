@@ -13,6 +13,7 @@ git clone https://github.com/mizitheji/ise-sync.git
 cd ise-sync
 pip install -r requirements.txt
 cp config.example.yaml config.yaml   # edit with your node details
+cp .env.example .env                 # fill in your credentials
 ```
 
 Enable ERS on each node: **Administration › Settings › ERS Settings › Enable ERS for Read/Write**. Use a dedicated ERS-enabled admin account, not your personal login. 🔐
@@ -50,16 +51,22 @@ The `env_prefix` field controls which environment variables are read for credent
 
 ## 🔑 Credentials
 
-Credentials are **never stored in config.yaml** — they come from environment variables. Export them before running:
+Credentials are **never stored in config.yaml** — they come from environment variables.
+
+**💡 Automatic `.env` loading:** Copy `.env.example` to `.env` and fill in your passwords. `ise-sync` automatically reads `.env` on startup if present in your current working directory.
+
+You can also export them manually or source your file:
 
 ```bash
+# Sourcing .env directly (each line uses export KEY=VALUE):
+source .env
+
+# Or export in your shell session:
 export ISE_HQ_USER=ise-api-account
 export ISE_HQ_PASS='your-password'
 export ISE_DR_USER=ise-api-account
 export ISE_DR_PASS='your-password'
 ```
-
-**💡 Tip:** save these in a local `.env` file (which is gitignored) and `source .env` before running.
 
 | Node in config | `env_prefix` | Variables read |
 |---|---|---|
@@ -184,6 +191,8 @@ Enable Open API separately: **Administration › System › Settings › API Set
 **✅ What `--include-advanced` covers:** the policy set *container* — name, rank (evaluation order), top-level condition, service name, enabled/disabled state.
 
 **⛔ What it deliberately does NOT cover:** the authentication and authorization *rules* nested inside each set. Auto-pushing rule changes is where this tool stops: rule order and exception handling are the highest blast-radius part of ISE to get wrong via a blind automated push.
+
+**🛡️ Built-in "Default" policy set:** Every ISE deployment has a permanent, system-managed fallback policy set named `Default`. It matches all traffic without conditions and is pinned to the bottom of the list. `ise-sync` automatically protects `Default`: its rank is managed dynamically by ISE as you add/reorder custom sets, so `ise-sync` ignores artificial rank differences on `Default` and avoids sending invalid or destructive updates against the system fallback.
 
 **➡️ Safe order:** sync the default resources first (NDGs, identity groups, authz profiles, ACLs, network devices) — policy sets reference those by name, so getting the flat objects in sync first avoids dangling references on the target.
 

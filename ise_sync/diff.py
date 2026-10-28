@@ -28,6 +28,10 @@ def _normalize(obj: dict, rdef: ResourceDef) -> dict:
     body = copy.deepcopy(_unwrap(obj, rdef))
     for f in rdef.strip_fields:
         body.pop(f, None)
+    # Built-in Default policy sets in ISE are always pinned to the bottom;
+    # their rank is automatically derived by ISE from the count of custom sets.
+    if rdef.api_type == "openapi" and (body.get("default") is True or body.get("name") == "Default"):
+        body.pop("rank", None)
     return body
 
 

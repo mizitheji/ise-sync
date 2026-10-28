@@ -28,10 +28,32 @@ from .resources import RESOURCES, ADVANCED_RESOURCES, BLOCKED_RESOURCES
 from .diff import build_plan, summarize_plan, print_diff_header, print_sync_summary, _unwrap  # noqa: reuse internal helper
 from .colours import bold, cyan, dim, green, yellow
 
+import os
+
 ALL_RESOURCES = {**RESOURCES, **ADVANCED_RESOURCES}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("ise_sync")
+
+
+def load_dotenv(path: str | Path = ".env") -> None:
+    """Populate os.environ from .env if not already set."""
+    env_file = Path(path)
+    if not env_file.is_file():
+        return
+    with env_file.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
+            if "=" in line:
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("'\"")
+                if k and k not in os.environ:
+                    os.environ[k] = v
 
 
 def load_config(path: str) -> dict:
@@ -163,6 +185,9 @@ def cmd_sync(args):
         for src_obj, tgt_obj, delta in plan.to_update:
             src_body = _unwrap(src_obj, rdef)
             tgt_body = _unwrap(tgt_obj, rdef)
+            if rdef.api_type == "openapi" and (src_body.get("default") is True or src_body.get("name") == "Default"):
+                logger.info("[%s] Skipping update for system '%s' policy set (managed automatically by ISE)", args.dst, src_body.get("name"))
+                continue
             merged = {k: v for k, v in src_body.items() if k not in rdef.strip_fields}
             merged["id"] = tgt_body["id"]  # keep target's own ID for the PUT
             payload = {rdef.wrapper_key: merged} if rdef.wrapper_key else merged
@@ -179,6 +204,7 @@ def cmd_sync(args):
 
 
 def main():
+    load_dotenv()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", default="config.yaml")
     sub = parser.add_subparsers(dest="command", required=True)
