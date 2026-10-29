@@ -32,6 +32,10 @@ def _normalize(obj: dict, rdef: ResourceDef) -> dict:
     # their rank is automatically derived by ISE from the count of custom sets.
     if rdef.api_type == "openapi" and (body.get("default") is True or body.get("name") == "Default"):
         body.pop("rank", None)
+    if rdef.key == "internal_users" and "identityGroups" in body:
+        val = body["identityGroups"]
+        if isinstance(val, str):
+            body["identityGroups"] = sorted([g.strip() for g in val.split(",") if g.strip()])
     return body
 
 

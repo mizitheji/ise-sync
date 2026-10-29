@@ -109,7 +109,15 @@ ADVANCED_RESOURCES: dict[str, ResourceDef] = {
         key="internal_users",
         ers_path="internaluser",
         wrapper_key="InternalUser",
-        strip_fields=("id", "link", "lastUpdate", "password"),
+        strip_fields=(
+            "id",
+            "link",
+            "lastUpdate",
+            "password",
+            "enablePassword",
+            "dateModified",
+            "dateCreated",
+        ),
     ),
 }
 

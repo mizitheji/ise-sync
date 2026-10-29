@@ -108,6 +108,40 @@ class ISEClient:
     def ers_delete(self, resource: str, obj_id: str) -> requests.Response:
         return self._request("DELETE", f"/ers/config/{resource}/{obj_id}")
 
+    def get_identity_group_id_to_name(self) -> dict[str, str]:
+        """Return a cached mapping of IdentityGroup ID -> Name for this node."""
+        if not hasattr(self, "_ig_id_to_name"):
+            self._ig_id_to_name = {
+                item["id"]: item["name"]
+                for item in self.ers_list("identitygroup")
+                if "id" in item and "name" in item
+            }
+        return self._ig_id_to_name
+
+    def get_identity_group_name_to_id(self) -> dict[str, str]:
+        """Return a cached mapping of IdentityGroup Name -> ID for this node."""
+        if not hasattr(self, "_ig_name_to_id"):
+            self._ig_name_to_id = {
+                item["name"]: item["id"]
+                for item in self.ers_list("identitygroup")
+                if "id" in item and "name" in item
+            }
+        return self._ig_name_to_id
+
+    def get_admin_user_names(self) -> set[str]:
+        """Return a cached set of admin user names on this node."""
+        if not hasattr(self, "_admin_user_names"):
+            try:
+                self._admin_user_names = {
+                    item["name"]
+                    for item in self.ers_list("adminuser")
+                    if "name" in item
+                }
+            except Exception as e:
+                logger.warning("[%s] Failed to fetch adminuser list: %s", self.name, e)
+                self._admin_user_names = set()
+        return self._admin_user_names
+
     # ---------- Open API (e.g. policy sets - confirmed working, ERS doesn't cover these) ----------
 
     def openapi_list(self, path: str) -> list[dict]:

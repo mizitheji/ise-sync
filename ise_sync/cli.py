@@ -88,6 +88,49 @@ def resolve_resource_list(cfg: dict, include_advanced: bool) -> list[str]:
     return resources
 
 
+def _translate_internal_users_groups(client: ISEClient, users: list[dict]) -> None:
+    """Translate identityGroups UUIDs in internal user bodies to group names in-place."""
+    try:
+        ig_map = client.get_identity_group_id_to_name()
+    except Exception as e:
+        logger.warning("[%s] Failed to resolve identity groups for internal users: %s", client.name, e)
+        return
+    rdef = ALL_RESOURCES["internal_users"]
+    for obj in users:
+        body = _unwrap(obj, rdef)
+        raw = body.get("identityGroups", "")
+        if raw and isinstance(raw, str):
+            gids = [g.strip() for g in raw.split(",") if g.strip()]
+            gnames = sorted([ig_map.get(gid, gid) for gid in gids])
+            body["identityGroups"] = ",".join(gnames)
+
+
+def _resolve_target_identity_groups(raw_groups: str | list[str], tgt_client: ISEClient, target_name: str) -> str:
+    """Convert group names to target node's group UUIDs."""
+    target_ig_map = tgt_client.get_identity_group_name_to_id()
+    if isinstance(raw_groups, str):
+        gnames = [g.strip() for g in raw_groups.split(",") if g.strip()]
+    else:
+        gnames = list(raw_groups)
+    target_ids = []
+    missing_groups = []
+    for gname in gnames:
+        gid = target_ig_map.get(gname)
+        if gid:
+            target_ids.append(gid)
+        else:
+            missing_groups.append(gname)
+    if missing_groups:
+        raise ISEAPIError(
+            "POST/PUT",
+            "/ers/config/internaluser",
+            400,
+            f"Target node '{target_name}' is missing identity group(s): {', '.join(missing_groups)}. "
+            f"Sync identity_groups first.",
+        )
+    return ",".join(target_ids)
+
+
 def fetch_all(client: ISEClient, resources: list[str]) -> dict[str, list[dict]]:
     out = {}
     label = bold(cyan(f"[{client.name}]"))
@@ -98,6 +141,8 @@ def fetch_all(client: ISEClient, resources: list[str]) -> dict[str, list[dict]]:
             out[res_key] = client.openapi_list(rdef.ers_path)
         else:
             out[res_key] = client.ers_get_all_detail(rdef.ers_path)
+        if res_key == "internal_users":
+            _translate_internal_users_groups(client, out[res_key])
         count = len(out[res_key])
         print(f"    {dim('·')} {res_key}: {count} object{'s' if count != 1 else ''}", flush=True)
     return out
@@ -172,6 +217,10 @@ def cmd_sync(args):
         for obj in plan.to_create:
             body = _unwrap(obj, rdef)
             body = {k: v for k, v in body.items() if k not in rdef.strip_fields}
+            if res_key == "internal_users" and "identityGroups" in body:
+                body["identityGroups"] = _resolve_target_identity_groups(
+                    body["identityGroups"], tgt_client, args.dst
+                )
             payload = {rdef.wrapper_key: body} if rdef.wrapper_key else body
             try:
                 if rdef.api_type == "openapi":
@@ -188,8 +237,19 @@ def cmd_sync(args):
             if rdef.api_type == "openapi" and (src_body.get("default") is True or src_body.get("name") == "Default"):
                 logger.info("[%s] Skipping update for system '%s' policy set (managed automatically by ISE)", args.dst, src_body.get("name"))
                 continue
+            if res_key == "internal_users" and src_body.get("name") in tgt_client.get_admin_user_names():
+                logger.info(
+                    "[%s] Skipping update for admin user '%s' (admin accounts are managed via Admin Access, not internaluser API)",
+                    args.dst,
+                    src_body.get("name"),
+                )
+                continue
             merged = {k: v for k, v in src_body.items() if k not in rdef.strip_fields}
             merged["id"] = tgt_body["id"]  # keep target's own ID for the PUT
+            if res_key == "internal_users" and "identityGroups" in merged:
+                merged["identityGroups"] = _resolve_target_identity_groups(
+                    merged["identityGroups"], tgt_client, args.dst
+                )
             payload = {rdef.wrapper_key: merged} if rdef.wrapper_key else merged
             try:
                 if rdef.api_type == "openapi":
