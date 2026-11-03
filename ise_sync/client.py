@@ -158,3 +158,6 @@ class ISEClient:
 
     def openapi_update(self, path: str, obj_id: str, body: dict) -> requests.Response:
         return self._request("PUT", f"/api/v1/{path}/{obj_id}", json=body)
+
+    def openapi_delete(self, path: str, obj_id: str) -> requests.Response:
+        return self._request("DELETE", f"/api/v1/{path}/{obj_id}")

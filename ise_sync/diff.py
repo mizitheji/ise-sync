@@ -15,7 +15,7 @@ class SyncPlan:
     to_create: list[dict] = field(default_factory=list)   # exists in source, not target
     to_update: list[tuple[dict, dict, dict]] = field(default_factory=list)  # (source_obj, target_obj, diff)
     unchanged: list[str] = field(default_factory=list)     # names
-    extra_in_target: list[dict] = field(default_factory=list)  # exists in target, not source (never auto-deleted)
+    extra_in_target: list[dict] = field(default_factory=list)  # exists in target, not source
 
 
 def _unwrap(obj: dict, rdef: ResourceDef) -> dict:
@@ -81,7 +81,7 @@ def build_plan(resource: str, rdef: ResourceDef, source_objs: list[dict],
     return plan
 
 
-def summarize_plan(plan: SyncPlan) -> str:
+def summarize_plan(plan: SyncPlan, delete_enabled: bool = False) -> str:
     """Return a coloured, human-friendly summary block for one resource type."""
     n_create  = len(plan.to_create)
     n_update  = len(plan.to_update)
@@ -118,7 +118,8 @@ def summarize_plan(plan: SyncPlan) -> str:
         lines.append(yellow(f"    ~  {name}") + dim(f"  ({fields} field group{'s' if fields != 1 else ''} differ)"))
 
     if n_extra:
-        lines.append(magenta(f"    ?  {n_extra} extra in target") + dim("  (not touched — review manually)"))
+        hint = "  (will prompt to delete with --apply)" if delete_enabled else "  (not touched — review manually)"
+        lines.append(magenta(f"    ?  {n_extra} extra in target") + dim(hint))
         for obj in plan.extra_in_target:
             lines.append(magenta(f"       •  {_obj_name(obj)}"))
 
@@ -142,7 +143,13 @@ def print_diff_header(src: str, dst: str) -> None:
     print()
 
 
-def print_sync_summary(plans: list[SyncPlan], applied: bool) -> None:
+def print_sync_summary(
+    plans: list[SyncPlan],
+    applied: bool,
+    delete_enabled: bool = False,
+    total_deleted: int = 0,
+    deletion_aborted: bool = False,
+) -> None:
     """Print a one-line summary after all resources have been processed."""
     total_create = sum(len(p.to_create) for p in plans)
     total_update = sum(len(p.to_update) for p in plans)
@@ -156,13 +163,31 @@ def print_sync_summary(plans: list[SyncPlan], applied: bool) -> None:
         parts = []
         if total_create: parts.append(green(f"✚ {total_create} to create"))
         if total_update: parts.append(yellow(f"~ {total_update} to update"))
-        if total_extra:  parts.append(magenta(f"? {total_extra} extra in target"))
+        if total_extra:
+            if delete_enabled:
+                parts.append(red(f"🗑 {total_extra} to delete"))
+            else:
+                parts.append(magenta(f"? {total_extra} extra in target"))
         print(bold("  DRY RUN  ") + "  ".join(parts))
-        print(dim("  Re-run with --apply to push changes."))
+        if delete_enabled:
+            print(dim("  Re-run with --apply --delete to push changes and delete extra objects."))
+        else:
+            print(dim("  Re-run with --apply to push changes (use --delete to also remove extra in target)."))
     else:
         parts = []
         if total_create: parts.append(green(f"✚ {total_create} created"))
         if total_update: parts.append(yellow(f"~ {total_update} updated"))
-        if total_extra:  parts.append(magenta(f"? {total_extra} extra in target (skipped)"))
+        if delete_enabled:
+            if total_deleted:
+                parts.append(red(f"🗑 {total_deleted} deleted"))
+            remaining = total_extra - total_deleted
+            if remaining > 0:
+                if deletion_aborted:
+                    parts.append(magenta(f"? {remaining} extra in target (skipped by user)"))
+                else:
+                    parts.append(magenta(f"? {remaining} extra in target (protected/skipped)"))
+        else:
+            if total_extra:
+                parts.append(magenta(f"? {total_extra} extra in target (skipped)"))
         print(bold("  ✔  Applied  ") + "  ".join(parts))
     print()

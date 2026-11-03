@@ -90,11 +90,20 @@ python -m ise_sync.cli diff --from hq-pan --to lab
 ### 🔁 sync — dry run by default
 
 ```bash
-# shows the same plan as diff, writes nothing
+# shows the plan, writes nothing
 python -m ise_sync.cli sync --from hq-pan --to dr-standalone
 
-# actually push creates and updates ✅
+# preview sync including deletions without modifying anything
+python -m ise_sync.cli sync --from hq-pan --to dr-standalone --delete
+
+# actually push creates and updates (leaves extra objects in target untouched) ✅
 python -m ise_sync.cli sync --from hq-pan --to dr-standalone --apply
+
+# push creates/updates AND delete extra target objects (with verification & confirmation prompt) 🗑️
+python -m ise_sync.cli sync --from hq-pan --to dr-standalone --apply --delete
+
+# auto-confirm deletion prompt (useful for non-interactive / automated pipelines)
+python -m ise_sync.cli sync --from hq-pan --to dr-standalone --apply --delete -y
 ```
 
 ### 📦 pull — snapshot a node to JSON
@@ -163,7 +172,16 @@ Objects are matched **by name** (not internal UUID) — two independently-built 
 
 **🔒 Passwords are never synced.** After syncing an `internal_users` create, set the password on the target node manually via the ISE GUI.
 
-**🗑️ Deletes are never automatic.** Objects in the target that have no matching source object appear as "extra in target" in the report for manual review. Silently deleting config on a live RADIUS/TACACS engine is exactly the kind of blast radius this tool avoids.
+**🗑️ Deletions are opt-in, verified, and interactive.** Objects in the target that have no matching source object appear as "extra in target" and are left untouched by default (`--apply` only creates and updates). To delete extra target objects:
+- Both `--apply` **and** `--delete` must be passed:
+  ```bash
+  python -m ise_sync.cli sync --from hq-pan --to dr-standalone --apply --delete
+  ```
+- **Pre-deletion verification:** Before any delete requests are executed, `ise-sync` displays a dedicated verification table detailing all objects marked for deletion (grouped by resource type with object name and ID).
+- **Interactive confirmation:** Prompts `Are you sure you want to permanently delete these N object(s)? [y/N]`. If declined or interrupted, no objects are touched.
+- **Auto-confirm (`-y` / `--yes`):** Pass `-y` or `--yes` alongside `--delete` to bypass the interactive prompt for automated/CI scripts.
+- **Reverse dependency order:** Deletions execute in reverse dependency order (child `network_devices` are deleted before parent `network_device_groups`) to prevent ISE dependency errors.
+- **Built-in safety protections:** System fallback objects (like ISE's built-in `Default` policy set) and local ISE administrator accounts are automatically shielded from deletion.
 
 **🚫 Active Directory is hard-blocked.** `activedirectory` is rejected in code (`resources.py → BLOCKED_RESOURCES`) regardless of `config.yaml` — domain join state (machine account, site/DC affinity, trust) is node-local, and pushing one node's AD config onto another can break its domain join outright.
 

@@ -9,9 +9,10 @@ so there is no node reboot at any point, in either direction.
 
 Usage:
     python -m ise_sync.cli diff  --config config.yaml --from dc1-pan --to dc2-standalone
-    python -m ise_sync.cli sync  --config config.yaml --from dc1-pan --to dc2-standalone            # dry-run (default)
-    python -m ise_sync.cli sync  --config config.yaml --from dc1-pan --to dc2-standalone --apply    # actually push creates/updates
-    python -m ise_sync.cli pull  --config config.yaml --node dc1-pan --out snapshots/dc1-pan.json   # export only, for git-tracked audit trail
+    python -m ise_sync.cli sync  --config config.yaml --from dc1-pan --to dc2-standalone                    # dry-run (default)
+    python -m ise_sync.cli sync  --config config.yaml --from dc1-pan --to dc2-standalone --apply            # push creates/updates
+    python -m ise_sync.cli sync  --config config.yaml --from dc1-pan --to dc2-standalone --apply --delete  # push and delete extra objects
+    python -m ise_sync.cli pull  --config config.yaml --node dc1-pan --out snapshots/dc1-pan.json           # export only, for git-tracked audit trail
 """
 from __future__ import annotations
 
@@ -25,8 +26,8 @@ import yaml
 
 from .client import ISEClient, ISEAPIError
 from .resources import RESOURCES, ADVANCED_RESOURCES, BLOCKED_RESOURCES
-from .diff import build_plan, summarize_plan, print_diff_header, print_sync_summary, _unwrap  # noqa: reuse internal helper
-from .colours import bold, cyan, dim, green, yellow
+from .diff import build_plan, summarize_plan, print_diff_header, print_sync_summary, _unwrap, _obj_name  # noqa: reuse internal helper
+from .colours import bold, cyan, dim, green, magenta, red, yellow
 
 import os
 
@@ -205,14 +206,19 @@ def cmd_sync(args):
         rdef = ALL_RESOURCES[res_key]
         plan = build_plan(res_key, rdef, src_data[res_key], tgt_data[res_key], exclude)
         plans.append(plan)
-        print(summarize_plan(plan))
+        print(summarize_plan(plan, delete_enabled=args.delete))
         print()
 
+    if not args.apply:
+        print_sync_summary(plans, applied=False, delete_enabled=args.delete)
+        return
+
+    # 1. Apply creates and updates (dependency order: parents before children)
+    for plan in plans:
+        res_key = plan.resource
+        rdef = ALL_RESOURCES[res_key]
         if not plan.to_create and not plan.to_update:
             continue
-
-        if not args.apply:
-            continue  # dry-run: report only
 
         for obj in plan.to_create:
             body = _unwrap(obj, rdef)
@@ -260,7 +266,89 @@ def cmd_sync(args):
             except ISEAPIError as e:
                 logger.error("[%s] FAILED update %s: %s", args.dst, src_body.get("name"), e)
 
-    print_sync_summary(plans, applied=args.apply)
+    # 2. Deletions (reverse dependency order: children before parents)
+    total_deleted = 0
+    deletion_aborted = False
+
+    if args.delete:
+        deletable_items = []
+        for plan in reversed(plans):
+            res_key = plan.resource
+            rdef = ALL_RESOURCES[res_key]
+            for obj in plan.extra_in_target:
+                body = _unwrap(obj, rdef)
+                name = body.get("name") or _obj_name(obj)
+                obj_id = body.get("id")
+
+                # System default policy set cannot be deleted
+                if rdef.api_type == "openapi" and (body.get("default") is True or name == "Default"):
+                    logger.info("[%s] Skipping delete for system '%s' policy set (protected fallback)", args.dst, name)
+                    continue
+                # ISE administrator accounts cannot be deleted via internaluser API
+                if res_key == "internal_users" and name in tgt_client.get_admin_user_names():
+                    logger.warning("[%s] Skipping delete for admin user '%s' (protected account)", args.dst, name)
+                    continue
+
+                deletable_items.append((res_key, rdef, name, obj_id))
+
+        if deletable_items:
+            print()
+            print(dim("─" * 52))
+            print(bold(red(f"  🗑  DELETION VERIFICATION: {len(deletable_items)} extra object(s) on '{args.dst}'")))
+            print(dim("  The following objects exist on target but NOT on source and are marked for deletion:"))
+            by_res: dict[str, list[tuple[str, str | None]]] = {}
+            for rk, _, n, oid in deletable_items:
+                by_res.setdefault(rk, []).append((n, oid))
+
+            for rk, items in by_res.items():
+                label = rk.replace("_", " ").title()
+                print(f"    • {bold(cyan(label))} ({len(items)}):")
+                for n, oid in items:
+                    id_disp = f"  (id: {oid})" if oid else ""
+                    print(f"       - {red(n)}{dim(id_disp)}")
+
+            print()
+            print(bold(yellow(f"  ⚠️  WARNING: Deletion is permanent and cannot be undone on '{args.dst}'.")))
+
+            confirmed = False
+            if args.yes:
+                print(bold("  --yes specified: auto-confirming deletion."))
+                confirmed = True
+            else:
+                try:
+                    prompt = bold(f"  Are you sure you want to permanently delete these {len(deletable_items)} object(s)? [y/N]: ")
+                    reply = input(prompt).strip().lower()
+                    confirmed = reply in ("y", "yes")
+                except (KeyboardInterrupt, EOFError):
+                    print()
+                    confirmed = False
+
+            if not confirmed:
+                print(yellow("  ✖ Deletion cancelled by user. Extra objects were not touched."))
+                deletion_aborted = True
+            else:
+                print(dim("  Deleting in reverse dependency order..."))
+                for rk, rdef, name, obj_id in deletable_items:
+                    if not obj_id:
+                        logger.error("[%s] Cannot delete %s '%s': missing object ID", args.dst, rk, name)
+                        continue
+                    try:
+                        if rdef.api_type == "openapi":
+                            tgt_client.openapi_delete(rdef.ers_path, obj_id)
+                        else:
+                            tgt_client.ers_delete(rdef.ers_path, obj_id)
+                        print(red(f"    ✔  deleted {name} ({rk.replace('_', ' ')})"))
+                        total_deleted += 1
+                    except ISEAPIError as e:
+                        logger.error("[%s] FAILED delete %s '%s': %s", args.dst, rk, name, e)
+
+    print_sync_summary(
+        plans,
+        applied=True,
+        delete_enabled=args.delete,
+        total_deleted=total_deleted,
+        deletion_aborted=deletion_aborted,
+    )
 
 
 def main():
@@ -283,10 +371,14 @@ def main():
                          help="Also diff policy sets (config.yaml: advanced_resources). Top-level container only, not nested rules.")
     p_diff.set_defaults(func=cmd_diff)
 
-    p_sync = sub.add_parser("sync", help="Diff and (optionally) push creates/updates from source to target")
+    p_sync = sub.add_parser("sync", help="Diff and (optionally) push creates/updates/deletes from source to target")
     p_sync.add_argument("--from", dest="src", required=True)
     p_sync.add_argument("--to", dest="dst", required=True)
     p_sync.add_argument("--apply", action="store_true", help="Actually push changes. Omit for dry-run.")
+    p_sync.add_argument("--delete", action="store_true",
+                         help="Delete extra objects on target that do not exist on source (prompts for confirmation).")
+    p_sync.add_argument("-y", "--yes", action="store_true",
+                         help="Auto-confirm deletion prompt when --delete is used.")
     p_sync.add_argument("--include-advanced", action="store_true",
                          help="Also sync policy sets (config.yaml: advanced_resources). Top-level container only, not nested rules - read README first.")
     p_sync.set_defaults(func=cmd_sync)
