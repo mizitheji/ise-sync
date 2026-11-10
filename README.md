@@ -18,8 +18,6 @@ cp .env.example .env                 # fill in your credentials
 
 Enable ERS on each node: **Administration › Settings › ERS Settings › Enable ERS for Read/Write**. Use a dedicated ERS-enabled admin account, not your personal login. 🔐
 
-Optional: `pip install .` gives you an `ise-sync` command (same as `python -m ise_sync.cli`).
-
 ---
 
 ## 🖥️ Adding your nodes
@@ -249,7 +247,6 @@ ise-sync/
 ├── config.example.yaml   ← template — copy to config.yaml and edit
 ├── config.yaml           ← your local config (gitignored)
 ├── requirements.txt
-├── tests/                ← offline unit tests (python -m unittest)
 └── ise_sync/
     ├── cli.py            ← entry point (diff / sync / pull commands)
     ├── client.py         ← ISE ERS + Open API HTTP client
