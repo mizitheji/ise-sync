@@ -1,14 +1,17 @@
 """
 Terminal colour helpers for ise_sync output.
 
-Uses raw ANSI codes (no external deps).  Colours are ON by default.
-Set the NO_COLOR=1 environment variable to disable them (e.g. when
-redirecting output to a log file or piping into another tool).
+Uses raw ANSI codes (no external deps).  Colours are ON by default when
+stdout is a terminal.  Set NO_COLOR=1 to force them off, or FORCE_COLOR=1
+to force them on (e.g. in CI logs that render ANSI).
 """
 from __future__ import annotations
 import os
+import sys
 
-_ENABLED = os.environ.get("NO_COLOR", "") == ""
+_ENABLED = (
+    "NO_COLOR" not in os.environ or os.environ["NO_COLOR"] == ""
+) and (bool(os.environ.get("FORCE_COLOR")) or sys.stdout.isatty())
 
 
 def _c(code: str, text: str) -> str:

@@ -18,6 +18,8 @@ cp .env.example .env                 # fill in your credentials
 
 Enable ERS on each node: **Administration › Settings › ERS Settings › Enable ERS for Read/Write**. Use a dedicated ERS-enabled admin account, not your personal login. 🔐
 
+Optional: `pip install .` gives you an `ise-sync` command (same as `python -m ise_sync.cli`).
+
 ---
 
 ## 🖥️ Adding your nodes
@@ -44,6 +46,8 @@ nodes:
 
   # ➕ add more nodes here — no limit
 ```
+
+`verify_ssl` **defaults to `true`** when omitted. Set it to `false` only for self-signed lab nodes, or point `ca_bundle: "/path/to/ca.pem"` at your internal CA.
 
 The `env_prefix` field controls which environment variables are read for credentials. A node with `env_prefix: "ISE_SITEB"` reads `ISE_SITEB_USER` and `ISE_SITEB_PASS`.
 
@@ -105,6 +109,18 @@ python -m ise_sync.cli sync --from hq-pan --to dr-standalone --apply --delete
 # auto-confirm deletion prompt (useful for non-interactive / automated pipelines)
 python -m ise_sync.cli sync --from hq-pan --to dr-standalone --apply --delete -y
 ```
+
+### 🤖 CI / drift checks
+
+```bash
+python -m ise_sync.cli diff --from hq-pan --to dr-standalone --exit-code   # rc 2 = drift found
+```
+
+Exit codes: `0` ok · `1` error or any failed create/update/delete · `2` drift (`diff --exit-code` only).
+
+### ⚡ Performance
+
+Per-object detail requests run concurrently (default 8 per node) and both nodes are fetched at the same time, over pooled keep-alive connections. GETs retry with backoff on 429/5xx; writes are never auto-retried. Tune with `max_workers` in `config.yaml` or `--workers N` (`--workers 1` = fully sequential).
 
 ### 📦 pull — snapshot a node to JSON
 
@@ -221,7 +237,7 @@ Enable Open API separately: **Administration › System › Settings › API Set
 - `sync` is read+diff by default — `--apply` is the only thing that writes. Nothing pushes without that explicit flag. 🛡️
 - Run `diff` in **both directions** before your first `--apply`. With two independently-managed nodes it's easy to have drifted in both directions rather than cleanly one way. 🔄
 - `internal_users` and policy sets are opt-in via `--include-advanced` — not touched by a plain `diff`/`sync`. 🧩
-- Coloured output is on by default. Set `NO_COLOR=1` to disable it when piping to a log file. 🎨
+- Coloured output is on when stdout is a terminal. `NO_COLOR=1` forces it off, `FORCE_COLOR=1` forces it on. 🎨
 - `deepdiff` is used for field-level comparison so you see *why* something is flagged as changed, not just that it is. 🔎
 
 ---
@@ -233,6 +249,7 @@ ise-sync/
 ├── config.example.yaml   ← template — copy to config.yaml and edit
 ├── config.yaml           ← your local config (gitignored)
 ├── requirements.txt
+├── tests/                ← offline unit tests (python -m unittest)
 └── ise_sync/
     ├── cli.py            ← entry point (diff / sync / pull commands)
     ├── client.py         ← ISE ERS + Open API HTTP client

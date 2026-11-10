@@ -17,6 +17,10 @@
 #   python -m ise_sync.cli diff --from hq-pan --to dr-pan
 #   python -m ise_sync.cli sync --from hq-pan --to dr-pan --apply
 
+# Concurrent detail requests per node (default 8). Lower it (or use --workers 1)
+# if ISE ERS returns HTTP 429 / rate-limit errors.
+max_workers: 8
+
 nodes:
 
   # ── Node 1 ──────────────────────────────────────────────────────────────
@@ -26,7 +30,8 @@ nodes:
     # must go to the PAN; reads can go to any ERS-enabled node.
     base_url: "https://ise-hq-pan.example.com"
     env_prefix: "ISE_HQ"       # → reads ISE_HQ_USER / ISE_HQ_PASS
-    verify_ssl: false           # set true if your cert chain is trusted
+    verify_ssl: false           # default is TRUE if omitted. false = lab/self-signed only.
+    # ca_bundle: "/etc/ssl/certs/corp-ca.pem"   # better: verify against your own CA
 
   # ── Node 2 ──────────────────────────────────────────────────────────────
   dr-standalone:

@@ -6,17 +6,28 @@ everything here is admin-API HTTPS calls (same class of traffic as the
 GUI uses), so there is no node reboot involved at any point.
 
 Auth: HTTP Basic against an ERS-enabled admin account. Credentials are
-resolved from environment variables per node - never hardcoded, same
-convention as netconf-backup.
+resolved from environment variables per node - never hardcoded.
+
+Performance notes:
+  * One pooled keep-alive Session per node (no TCP/TLS handshake per call).
+  * Per-object detail GETs are fetched concurrently (bounded by
+    `max_workers`) - this is the N+1 hot path when a node has hundreds of
+    network devices.
+  * Idempotent GETs are retried with backoff on 429/5xx (ISE ERS rate-limits).
+    Writes are never auto-retried.
 """
 from __future__ import annotations
 
-import os
 import logging
-from typing import Any, Iterator
+import os
+from concurrent.futures import ThreadPoolExecutor
+from typing import Iterator, Union
 
 import requests
+import urllib3
+from requests.adapters import HTTPAdapter
 from requests.auth import HTTPBasicAuth
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger("ise_sync.client")
 
@@ -24,6 +35,8 @@ ERS_HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
 }
+
+DEFAULT_WORKERS = 8
 
 
 class ISEAPIError(RuntimeError):
@@ -36,12 +49,15 @@ class ISEAPIError(RuntimeError):
 
 
 class ISEClient:
-    def __init__(self, name: str, base_url: str, env_prefix: str, verify_ssl: bool = False,
-                 timeout: int = 30):
+    def __init__(self, name: str, base_url: str, env_prefix: str,
+                 verify_ssl: Union[bool, str] = True, timeout: int = 30,
+                 max_workers: int = DEFAULT_WORKERS, retries: int = 3):
+        """`verify_ssl` may be True, False, or a path to a CA bundle."""
         self.name = name
         self.base_url = base_url.rstrip("/")
         self.verify_ssl = verify_ssl
-        self.timeout = timeout
+        self.timeout = (10, timeout)  # (connect, read)
+        self.max_workers = max(1, int(max_workers))
 
         user = os.environ.get(f"{env_prefix}_USER")
         pw = os.environ.get(f"{env_prefix}_PASS")
@@ -50,20 +66,32 @@ class ISEClient:
                 f"Missing credentials for node '{name}': expected env vars "
                 f"{env_prefix}_USER and {env_prefix}_PASS"
             )
-        self.auth = HTTPBasicAuth(user, pw)
-        self.session = requests.Session()
 
-        if not verify_ssl:
-            requests.packages.urllib3.disable_warnings()  # noqa
+        self.session = requests.Session()
+        self.session.auth = HTTPBasicAuth(user, pw)
+        self.session.headers.update(ERS_HEADERS)
+        retry = Retry(
+            total=retries, backoff_factor=0.5,
+            status_forcelist=(429, 502, 503, 504),
+            allowed_methods=frozenset({"GET"}),   # never replay writes
+            respect_retry_after_header=True, raise_on_status=False,
+        )
+        adapter = HTTPAdapter(pool_connections=2, pool_maxsize=self.max_workers,
+                              max_retries=retry)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
+        if verify_ssl is False:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        self._cache: dict[str, object] = {}
 
     # ---------- low level ----------
 
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
         url = f"{self.base_url}{path}"
-        resp = self.session.request(
-            method, url, auth=self.auth, headers=ERS_HEADERS,
-            verify=self.verify_ssl, timeout=self.timeout, **kwargs,
-        )
+        resp = self.session.request(method, url, verify=self.verify_ssl,
+                                    timeout=self.timeout, **kwargs)
         if resp.status_code >= 400:
             raise ISEAPIError(method, url, resp.status_code, resp.text)
         return resp
@@ -80,24 +108,25 @@ class ISEClient:
                 params={"size": page_size, "page": page},
             )
             data = resp.json().get("SearchResult", {})
-            for item in data.get("resources", []):
-                yield item
-            total = data.get("total", 0)
-            if page * page_size >= total:
+            items = data.get("resources", [])
+            yield from items
+            # stop on last page, or defensively on an empty page (no infinite loop)
+            if not items or page * page_size >= data.get("total", 0):
                 break
             page += 1
 
     def ers_get_detail(self, resource: str, obj_id: str) -> dict:
         """Fetch the full object body (not just the summary) by ID."""
-        resp = self._request("GET", f"/ers/config/{resource}/{obj_id}")
-        return resp.json()
+        return self._request("GET", f"/ers/config/{resource}/{obj_id}").json()
 
     def ers_get_all_detail(self, resource: str) -> list[dict]:
-        """List + fetch full detail for every object of a resource type."""
-        out = []
-        for summary in self.ers_list(resource):
-            out.append(self.ers_get_detail(resource, summary["id"]))
-        return out
+        """List + fetch full detail for every object of a resource type.
+        Detail GETs run concurrently; result order matches the listing."""
+        ids = [s["id"] for s in self.ers_list(resource)]
+        if len(ids) <= 1 or self.max_workers == 1:
+            return [self.ers_get_detail(resource, i) for i in ids]
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            return list(pool.map(lambda i: self.ers_get_detail(resource, i), ids))
 
     def ers_create(self, resource: str, body: dict) -> requests.Response:
         return self._request("POST", f"/ers/config/{resource}", json=body)
@@ -108,47 +137,42 @@ class ISEClient:
     def ers_delete(self, resource: str, obj_id: str) -> requests.Response:
         return self._request("DELETE", f"/ers/config/{resource}/{obj_id}")
 
+    # ---------- cached lookups ----------
+
+    def _identity_groups(self) -> list[dict]:
+        """One listing serves both id->name and name->id (was two separate calls)."""
+        if "ig" not in self._cache:
+            self._cache["ig"] = [i for i in self.ers_list("identitygroup")
+                                 if "id" in i and "name" in i]
+        return self._cache["ig"]  # type: ignore[return-value]
+
+    def invalidate_identity_groups(self) -> None:
+        """Call after creating identity groups so later lookups see them."""
+        self._cache.pop("ig", None)
+
     def get_identity_group_id_to_name(self) -> dict[str, str]:
-        """Return a cached mapping of IdentityGroup ID -> Name for this node."""
-        if not hasattr(self, "_ig_id_to_name"):
-            self._ig_id_to_name = {
-                item["id"]: item["name"]
-                for item in self.ers_list("identitygroup")
-                if "id" in item and "name" in item
-            }
-        return self._ig_id_to_name
+        return {i["id"]: i["name"] for i in self._identity_groups()}
 
     def get_identity_group_name_to_id(self) -> dict[str, str]:
-        """Return a cached mapping of IdentityGroup Name -> ID for this node."""
-        if not hasattr(self, "_ig_name_to_id"):
-            self._ig_name_to_id = {
-                item["name"]: item["id"]
-                for item in self.ers_list("identitygroup")
-                if "id" in item and "name" in item
-            }
-        return self._ig_name_to_id
+        return {i["name"]: i["id"] for i in self._identity_groups()}
 
     def get_admin_user_names(self) -> set[str]:
         """Return a cached set of admin user names on this node."""
-        if not hasattr(self, "_admin_user_names"):
+        if "admins" not in self._cache:
             try:
-                self._admin_user_names = {
-                    item["name"]
-                    for item in self.ers_list("adminuser")
-                    if "name" in item
-                }
+                self._cache["admins"] = {i["name"] for i in self.ers_list("adminuser")
+                                         if "name" in i}
             except Exception as e:
                 logger.warning("[%s] Failed to fetch adminuser list: %s", self.name, e)
-                self._admin_user_names = set()
-        return self._admin_user_names
+                self._cache["admins"] = set()
+        return self._cache["admins"]  # type: ignore[return-value]
 
-    # ---------- Open API (e.g. policy sets - confirmed working, ERS doesn't cover these) ----------
+    # ---------- Open API (e.g. policy sets - ERS doesn't cover these) ----------
 
     def openapi_list(self, path: str) -> list[dict]:
         """List endpoints return full objects inline under a 'response' key -
         unlike ERS there's no separate summary+detail step."""
-        resp = self._request("GET", f"/api/v1/{path}")
-        data = resp.json()
+        data = self._request("GET", f"/api/v1/{path}").json()
         if isinstance(data, dict):
             return data.get("response", [])
         return data if isinstance(data, list) else []

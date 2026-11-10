@@ -132,3 +132,11 @@ BLOCKED_RESOURCES: set[str] = {
     "activedirectory",
     "active_directory",
 }
+
+
+def is_system_policy_set(rdef: ResourceDef, body: dict) -> bool:
+    """The built-in 'Default' policy set is ISE-managed (rank is derived,
+    cannot be deleted) - never update or delete it."""
+    return rdef.api_type == "openapi" and (
+        body.get("default") is True or body.get("name") == "Default"
+    )

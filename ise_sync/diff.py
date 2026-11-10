@@ -2,10 +2,11 @@ from __future__ import annotations
 import copy
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from deepdiff import DeepDiff
 
-from .resources import ResourceDef
+from .resources import ResourceDef, is_system_policy_set
 from .colours import bold, cyan, dim, green, magenta, red, yellow
 
 
@@ -16,6 +17,10 @@ class SyncPlan:
     to_update: list[tuple[dict, dict, dict]] = field(default_factory=list)  # (source_obj, target_obj, diff)
     unchanged: list[str] = field(default_factory=list)     # names
     extra_in_target: list[dict] = field(default_factory=list)  # exists in target, not source
+
+    @property
+    def has_drift(self) -> bool:
+        return bool(self.to_create or self.to_update or self.extra_in_target)
 
 
 def _unwrap(obj: dict, rdef: ResourceDef) -> dict:
@@ -30,7 +35,7 @@ def _normalize(obj: dict, rdef: ResourceDef) -> dict:
         body.pop(f, None)
     # Built-in Default policy sets in ISE are always pinned to the bottom;
     # their rank is automatically derived by ISE from the count of custom sets.
-    if rdef.api_type == "openapi" and (body.get("default") is True or body.get("name") == "Default"):
+    if is_system_policy_set(rdef, body):
         body.pop("rank", None)
     if rdef.key == "internal_users" and "identityGroups" in body:
         val = body["identityGroups"]
@@ -39,8 +44,19 @@ def _normalize(obj: dict, rdef: ResourceDef) -> dict:
     return body
 
 
-def _excluded(name: str, patterns: list[str]) -> bool:
-    return any(re.match(p, name) for p in patterns)
+@lru_cache(maxsize=None)
+def _compile(patterns: tuple[str, ...]) -> tuple[re.Pattern, ...]:
+    return tuple(re.compile(p) for p in patterns)
+
+
+def _excluded(name: str, patterns) -> bool:
+    return any(rx.match(name) for rx in _compile(tuple(patterns)))
+
+
+def changed_fields(delta) -> list[str]:
+    """Top-level field names that differ (e.g. ['description', 'NetworkDeviceGroupList'])."""
+    keys = getattr(delta, "affected_root_keys", None)
+    return sorted(str(k) for k in keys) if keys else []
 
 
 def _obj_name(obj: dict) -> str:
@@ -51,14 +67,16 @@ def build_plan(resource: str, rdef: ResourceDef, source_objs: list[dict],
                target_objs: list[dict], exclude_patterns: list[str]) -> SyncPlan:
     plan = SyncPlan(resource=resource)
 
-    src_by_name = {
-        _unwrap(o, rdef)["name"]: o for o in source_objs
-        if not _excluded(_unwrap(o, rdef)["name"], exclude_patterns)
-    }
-    tgt_by_name = {
-        _unwrap(o, rdef)["name"]: o for o in target_objs
-        if not _excluded(_unwrap(o, rdef)["name"], exclude_patterns)
-    }
+    def _index(objs: list[dict]) -> dict[str, dict]:
+        out = {}
+        for o in objs:
+            name = _unwrap(o, rdef)["name"]
+            if not _excluded(name, exclude_patterns):
+                out[name] = o
+        return out
+
+    src_by_name = _index(source_objs)
+    tgt_by_name = _index(target_objs)
 
     for name, src_obj in src_by_name.items():
         if name not in tgt_by_name:
@@ -114,8 +132,9 @@ def summarize_plan(plan: SyncPlan, delete_enabled: bool = False) -> str:
 
     for src, _tgt, delta in plan.to_update:
         name = _obj_name(src)
-        fields = len(delta)
-        lines.append(yellow(f"    ~  {name}") + dim(f"  ({fields} field group{'s' if fields != 1 else ''} differ)"))
+        fields = changed_fields(delta)
+        what = ", ".join(fields) if fields else f"{len(delta)} difference(s)"
+        lines.append(yellow(f"    ~  {name}") + dim(f"  (changed: {what})"))
 
     if n_extra:
         hint = "  (will prompt to delete with --apply)" if delete_enabled else "  (not touched — review manually)"
