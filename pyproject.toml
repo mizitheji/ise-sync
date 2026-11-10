@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ise-sync"
+version = "0.2.0"
+description = "Diff and sync Cisco ISE ERS config objects between independent nodes"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = ["requests>=2.31.0", "PyYAML>=6.0", "deepdiff>=6.7.0"]
+
+[project.scripts]
+ise-sync = "ise_sync.cli:main"
+
+[tool.setuptools]
+packages = ["ise_sync"]
